@@ -1,28 +1,48 @@
-import json, os, time, secrets, hashlib, base64, shutil
+import os, time, secrets, hashlib, base64, json
+from contextlib import asynccontextmanager
+import certifi
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
+from pymongo import AsyncMongoClient
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-# Data lives outside the project folder so editors (e.g. Live Server) don't auto-reload on every save
-DB = os.path.join(os.environ.get('DATA_DIR') or os.path.expanduser('~/.parley'), 'parley.json')
-try:
-    os.makedirs(os.path.dirname(DB), exist_ok=True)
-except PermissionError:
-    print('WARNING: cannot write to', os.path.dirname(DB), '- is the disk attached? Using temporary storage, data will be lost on restart.')
-    DB = '/tmp/parley.json'
-if not os.path.exists(DB) and os.path.exists(os.path.join(BASE, 'parley.json')):
-    shutil.move(os.path.join(BASE, 'parley.json'), DB)
-D = {'users': {}, 'groups': {}, 'msgs': {}, 'posts': []}
-if os.path.exists(DB):
-    D.update(json.load(open(DB)))
+D = {'users': {}, 'groups': {}, 'posts': []}   # in-memory copy, MongoDB is the source of truth
+db = None
 
-def save():
-    json.dump(D, open(DB, 'w'))
+@asynccontextmanager
+async def lifespan(app):
+    global db
+    uri = os.environ.get('MONGODB_URI')
+    if not uri:
+        raise RuntimeError('Set the MONGODB_URI environment variable to your MongoDB connection string')
+    kw = {'tlsCAFile': certifi.where()} if uri.startswith('mongodb+srv') else {}
+    client = AsyncMongoClient(uri, **kw)
+    db = client[os.environ.get('MONGODB_DB', 'parley')]
+    await db.msgs.create_index([('room', 1), ('t', -1)])
+    async for u in db.users.find():
+        D['users'][u.pop('_id')] = u
+    async for g in db.groups.find():
+        D['groups'][g.pop('_id')] = g
+    async for p in db.posts.find().sort('t', -1).limit(100):
+        p.pop('_id')
+        D['posts'].append(p)
+    print(f"Loaded {len(D['users'])} users, {len(D['groups'])} groups, {len(D['posts'])} posts")
+    yield
+    await client.close()
 
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=['*'], allow_methods=['*'], allow_headers=['*'])
+
+async def put_user(n):
+    await db.users.replace_one({'_id': n}, {**D['users'][n], '_id': n}, upsert=True)
+
+async def put_group(i):
+    await db.groups.replace_one({'_id': i}, {**D['groups'][i], '_id': i}, upsert=True)
+
+async def put_post(p):
+    await db.posts.replace_one({'_id': p['id']}, {**p, '_id': p['id']}, upsert=True)
 
 class Auth(BaseModel):
     username: str
@@ -32,7 +52,7 @@ def h(p, s):
     return hashlib.sha256((s + p).encode()).hexdigest()
 
 @app.post('/register')
-def register(a: Auth):
+async def register(a: Auth):
     u = a.username.strip()
     if not 3 <= len(u) <= 20 or not u.replace('_', '').isalnum():
         raise HTTPException(400, 'Username: 3-20 letters, numbers or underscores')
@@ -41,17 +61,18 @@ def register(a: Auth):
     if u.lower() in {k.lower() for k in D['users']}:
         raise HTTPException(400, 'That username is taken')
     s = secrets.token_hex(8)
-    D['users'][u] = {'salt': s, 'pw': h(a.password, s), 'bio': '', 'games': [], 'tok': '', 'friends': [], 'reqs': [], 'av': '', 'bn': ''}
-    save()
+    D['users'][u] = {'salt': s, 'pw': h(a.password, s), 'bio': '', 'games': [], 'tok': '',
+                     'friends': [], 'reqs': [], 'av': '', 'bn': ''}
+    await put_user(u)
     return {'ok': 1}
 
 @app.post('/login')
-def login(a: Auth):
+async def login(a: Auth):
     u = D['users'].get(a.username.strip())
     if not u or u['pw'] != h(a.password, u['salt']):
         raise HTTPException(401, 'Wrong username or password')
     u['tok'] = secrets.token_hex(16)
-    save()
+    await put_user(a.username.strip())
     return {'token': u['tok']}
 
 conns, calls = {}, {}
@@ -99,7 +120,9 @@ async def handle(u, m):
     if a == 'hist':
         r = m.get('room', '')
         if can(u, r):
-            await to(u, {'e': 'hist', 'room': r, 'm': D['msgs'].get(r, [])})
+            L = await db.msgs.find({'room': r}, {'_id': 0, 'room': 0}).sort('t', -1).limit(150).to_list(150)
+            L.reverse()
+            await to(u, {'e': 'hist', 'room': r, 'm': L})
     elif a == 'msg':
         r, k, d = m.get('room', ''), m.get('k'), str(m.get('d', ''))
         if not can(u, r) or k not in ('text', 'img', 'voice') or len(d) > 4_000_000 or not d:
@@ -107,38 +130,43 @@ async def handle(u, m):
         if k == 'text':
             d = d[:2000]
         g = {'id': secrets.token_hex(4), 'from': u, 't': int(time.time() * 1000), 'k': k, 'd': d}
-        L = D['msgs'].setdefault(r, [])
-        L.append(g)
-        del L[:-150]
-        save()
+        await db.msgs.insert_one({**g, 'room': r})
+        old = await db.msgs.find({'room': r}, {'_id': 1}).sort('t', -1).skip(150).to_list(None)
+        if old:
+            await db.msgs.delete_many({'_id': {'$in': [o['_id'] for o in old]}})
         for v in room_users(r):
             await to(v, {'e': 'msg', 'room': r, 'm': g})
     elif a == 'gnew':
         n = str(m.get('name', '')).strip()[:30]
         if n:
-            G[secrets.token_hex(3)] = {'name': n, 'desc': str(m.get('desc', ''))[:120], 'public': bool(m.get('public')),
-                                       'owner': u, 'admins': [u], 'members': [u]}
-            save()
+            i = secrets.token_hex(3)
+            G[i] = {'name': n, 'desc': str(m.get('desc', ''))[:120], 'public': bool(m.get('public')),
+                    'owner': u, 'admins': [u], 'members': [u]}
+            await put_group(i)
             await push()
     elif a == 'gjoin':
         g = G.get(m.get('id'))
         if g and g['public'] and u not in g['members']:
             g['members'].append(u)
-            save()
+            await put_group(m['id'])
             await push()
     elif a == 'gleave':
-        g = G.get(m.get('id'))
+        gid = m.get('id')
+        g = G.get(gid)
         if g and u in g['members']:
             g['members'].remove(u)
             if u in g['admins']:
                 g['admins'].remove(u)
             if not g['members']:
-                del G[m['id']]
-            elif u == g['owner']:
-                g['owner'] = (g['admins'] or g['members'])[0]
-                if g['owner'] not in g['admins']:
-                    g['admins'].append(g['owner'])
-            save()
+                del G[gid]
+                await db.groups.delete_one({'_id': gid})
+                await db.msgs.delete_many({'room': gid})
+            else:
+                if u == g['owner']:
+                    g['owner'] = (g['admins'] or g['members'])[0]
+                    if g['owner'] not in g['admins']:
+                        g['admins'].append(g['owner'])
+                await put_group(gid)
             await push()
     elif a == 'gmod':
         g, t, op = G.get(m.get('id')), m.get('user'), m.get('op')
@@ -156,7 +184,7 @@ async def handle(u, m):
                 g['admins'].remove(t)
             else:
                 g['admins'].append(t)
-        save()
+        await put_group(m['id'])
         await push()
     elif a == 'prof':
         x = D['users'][u]
@@ -167,15 +195,17 @@ async def handle(u, m):
             if v.startswith('data:image/') and len(v) < 1_500_000:
                 x[k] = v
                 x['ver'] = int(time.time())
-        save()
+        await put_user(u)
         await push()
     elif a == 'post':
         txt, img = str(m.get('txt', ''))[:280], str(m.get('img', ''))
         if (txt.strip() or img) and len(img) < 4_000_000:
             p = {'id': secrets.token_hex(4), 'by': u, 't': int(time.time() * 1000), 'txt': txt, 'img': img, 'likes': [], 'cm': []}
             D['posts'].insert(0, p)
-            del D['posts'][100:]
-            save()
+            await put_post(p)
+            while len(D['posts']) > 100:
+                o = D['posts'].pop()
+                await db.posts.delete_one({'_id': o['id']})
             for v in list(conns):
                 await to(v, {'e': 'post', 'p': p})
     elif a in ('like', 'cmt'):
@@ -188,7 +218,7 @@ async def handle(u, m):
             p['cm'].append({'by': u, 't': int(time.time() * 1000), 'txt': str(m['txt'])[:300]})
         else:
             return
-        save()
+        await put_post(p)
         for v in list(conns):
             await to(v, {'e': 'pupd', 'p': p})
     elif a in ('freq', 'facc', 'fdec', 'funf'):
@@ -211,13 +241,16 @@ async def handle(u, m):
             mf.remove(t)
             if u in tf:
                 tf.remove(u)
-        save()
+        await put_user(u)
+        await put_user(t)
         await push()
     elif a == 'pdel':
-        D['posts'] = [p for p in D['posts'] if not (p['id'] == m.get('id') and p['by'] == u)]
-        save()
-        for v in list(conns):
-            await to(v, {'e': 'posts', 'p': D['posts']})
+        pid = m.get('id')
+        if any(p['id'] == pid and p['by'] == u for p in D['posts']):
+            D['posts'] = [p for p in D['posts'] if p['id'] != pid]
+            await db.posts.delete_one({'_id': pid})
+            for v in list(conns):
+                await to(v, {'e': 'posts', 'p': D['posts']})
     elif a == 'cjoin':
         r = m.get('room', '')
         if not can(u, r):
