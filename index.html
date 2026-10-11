@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Parley - Sign in</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0e1013;--panel:#15181c;--line:#262b32;--text:#e4e6e9;--mute:#8b929c;--acc:#7f8cf5;--bad:#d46a6a;--ok:#5bbf8a}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;min-height:100dvh;display:grid;grid-template-columns:1.1fr 1fr;background:var(--bg);color:var(--text);font:400 16px/1.5 'IBM Plex Sans',system-ui,sans-serif}
+.hero{padding:64px;display:flex;flex-direction:column;justify-content:flex-end;background:linear-gradient(160deg,#1b2038 0%,#12141c 55%,#0e1013 100%);position:relative;overflow:hidden;border-right:1px solid var(--line)}
+.hero::before{content:"";position:absolute;width:520px;height:520px;top:-160px;left:-120px;border-radius:50%;background:radial-gradient(circle,rgba(127,140,245,.28),transparent 65%);animation:drift 16s ease-in-out infinite alternate}
+@keyframes drift{to{transform:translate(120px,90px)}}
+.hero h1{font-weight:600;font-size:60px;letter-spacing:-1.5px;margin:0 0 12px;position:relative}
+.hero p{max-width:420px;color:#b4b9c4;margin:0;font-size:18px;position:relative}
+.side{display:grid;place-items:center;padding:32px}
+.box{width:min(360px,100%)}
+.box h2{font-weight:600;font-size:24px;margin:0 0 4px}
+.sub{color:var(--mute);margin:0 0 24px}
+label{display:block;font-size:13px;color:var(--mute);margin:14px 0 6px}
+input{width:100%;padding:11px 13px;background:var(--panel);border:1px solid var(--line);border-radius:8px;color:var(--text);font:inherit;outline:none;transition:border-color .15s}
+input:focus{border-color:var(--acc)}
+#error{min-height:20px;margin-top:12px;font-size:14px;color:var(--bad)}
+#error.ok{color:var(--ok)}
+button{width:100%;margin-top:6px;padding:12px;border:0;border-radius:8px;background:var(--acc);color:#0e1013;font:600 15px 'IBM Plex Sans';cursor:pointer;transition:filter .15s,transform .1s}
+button:hover{filter:brightness(1.1)}button:active{transform:scale(.99)}button:disabled{opacity:.6}
+.alt{margin-top:18px;color:var(--mute);font-size:14px;text-align:center}
+.alt a{color:var(--acc);cursor:pointer}
+@media(max-width:800px){body{grid-template-columns:1fr;grid-template-rows:auto 1fr}.hero{padding:36px 24px 24px;border-right:0;border-bottom:1px solid var(--line)}.hero h1{font-size:40px;margin-bottom:6px}.hero p{font-size:15px}.side{align-items:start;padding:24px 20px}input{font-size:16px}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important}}
+</style>
+</head>
+<body>
+<section class="hero">
+  <h1>Parley</h1>
+  <p>Talk to your people, run your groups, and keep up with what your community is playing.</p>
+</section>
+<section class="side">
+  <div class="box">
+    <h2 id="title">Sign in</h2>
+    <p class="sub" id="sub">Welcome back.</p>
+    <label for="user">Username</label>
+    <input id="user" autocomplete="username">
+    <label for="pass">Password</label>
+    <input id="pass" type="password" autocomplete="current-password" onkeypress="if(event.key==='Enter')go()">
+    <div id="error"></div>
+    <button id="btn" onclick="go()">Sign in</button>
+    <div class="alt"><span id="alt">New here?</span> <a onclick="flip()" id="lnk">Create an account</a></div>
+  </div>
+</section>
+<script>
+const API=(location.protocol==='file:'||(location.port&&location.port!=='8000'&&/^(localhost|127\.0\.0\.1)$/.test(location.hostname)))?'http://localhost:8000':location.origin;
+if(localStorage.getItem('parley_token'))location.href='main.html';
+let reg=false;const $=i=>document.getElementById(i);
+function flip(){
+  reg=!reg;
+  $('title').textContent=reg?'Create account':'Sign in';
+  $('sub').textContent=reg?'Pick a username other people will recognise.':'Welcome back.';
+  $('btn').textContent=reg?'Create account':'Sign in';
+  $('alt').textContent=reg?'Already registered?':'New here?';
+  $('lnk').textContent=reg?'Sign in':'Create an account';
+  $('error').textContent='';
+}
+async function go(){
+  const u=$('user').value.trim(),p=$('pass').value,e=$('error');
+  e.className='';e.textContent='';
+  if(!u||!p){e.textContent='Enter a username and password.';return}
+  $('btn').disabled=true;
+  try{
+    const r=await fetch(API+(reg?'/register':'/login'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})});
+    let d={};
+    try{d=await r.json()}catch(_){}
+    if(!r.ok)throw new Error(d.detail||'The server at '+API+' did not understand the request. Make sure server.py from the parley folder is the one running on port 8000 (the old server must be stopped).');
+    if(!reg&&!d.token)throw new Error('The server at '+API+' is not the Parley server. Stop the old one and run: uvicorn server:app --port 8000');
+    if(reg){flip();e.className='ok';e.textContent='Account created. Sign in to continue.'}
+    else{localStorage.setItem('parley_user',u);localStorage.setItem('parley_token',d.token);location.href='main.html'}
+  }catch(x){e.textContent=x instanceof TypeError?'Cannot reach the server. Start it with: uvicorn server:app --port 8000':x.message}
+  $('btn').disabled=false;
+}
+</script>
+</body>
+</html>
