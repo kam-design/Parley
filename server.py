@@ -7,7 +7,11 @@ from pydantic import BaseModel
 BASE = os.path.dirname(os.path.abspath(__file__))
 # Data lives outside the project folder so editors (e.g. Live Server) don't auto-reload on every save
 DB = os.path.join(os.environ.get('DATA_DIR') or os.path.expanduser('~/.parley'), 'parley.json')
-os.makedirs(os.path.dirname(DB), exist_ok=True)
+try:
+    os.makedirs(os.path.dirname(DB), exist_ok=True)
+except PermissionError:
+    print('WARNING: cannot write to', os.path.dirname(DB), '- is the disk attached? Using temporary storage, data will be lost on restart.')
+    DB = '/tmp/parley.json'
 if not os.path.exists(DB) and os.path.exists(os.path.join(BASE, 'parley.json')):
     shutil.move(os.path.join(BASE, 'parley.json'), DB)
 D = {'users': {}, 'groups': {}, 'msgs': {}, 'posts': []}
