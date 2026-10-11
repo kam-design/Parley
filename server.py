@@ -14,7 +14,7 @@ db = None
 @asynccontextmanager
 async def lifespan(app):
     global db
-    uri = os.environ.get('MONGODB_URI')
+    uri = (os.environ.get('MONGODB_URI') or '').strip().strip('"\'')
     if not uri:
         raise RuntimeError('Set the MONGODB_URI environment variable to your MongoDB connection string')
     kw = {'tlsCAFile': certifi.where()} if uri.startswith('mongodb+srv') else {}
