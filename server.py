@@ -1,4 +1,4 @@
-import os, time, secrets, hashlib, base64, json
+import os, time, secrets, hashlib, base64, json, traceback
 from contextlib import asynccontextmanager
 import certifi
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
@@ -71,11 +71,22 @@ async def login(a: Auth):
     u = D['users'].get(a.username.strip())
     if not u or u['pw'] != h(a.password, u['salt']):
         raise HTTPException(401, 'Wrong username or password')
-    u['tok'] = secrets.token_hex(16)
+    tok = secrets.token_hex(16)
+    u['tok'] = tok
+    u['toks'] = (u.get('toks', []) + [tok])[-8:]
     await put_user(a.username.strip())
-    return {'token': u['tok']}
+    return {'token': tok}
 
 conns, calls = {}, {}
+
+def good_token(x, t):
+    return bool(x) and bool(t) and (t in x.get('toks', []) or t == x.get('tok'))
+
+@app.get('/check/{user}')
+def check(user: str, t: str = ''):
+    if not good_token(D['users'].get(user), t):
+        raise HTTPException(401, 'Session expired')
+    return {'ok': 1}
 
 def room_users(r):
     if r.startswith('dm:'):
@@ -276,19 +287,26 @@ async def handle(u, m):
 async def ws(w: WebSocket, user: str, t: str = ''):
     await w.accept()
     x = D['users'].get(user)
-    if not x or not t or x['tok'] != t:
+    if not good_token(x, t):
         await w.close(4001)
         return
     conns[user] = w
-    await push()
-    await to(user, {'e': 'posts', 'p': D['posts']})
     try:
+        await push()
+        await to(user, {'e': 'posts', 'p': D['posts']})
         while True:
-            await handle(user, json.loads(await w.receive_text()))
+            raw = await w.receive_text()
+            try:
+                await handle(user, json.loads(raw))
+            except WebSocketDisconnect:
+                raise
+            except Exception as ex:
+                traceback.print_exc()
+                await to(user, {'e': 'err', 'm': f'{type(ex).__name__}: {ex}'[:200]})
     except WebSocketDisconnect:
         pass
-    except Exception as ex:
-        print('ws error', ex)
+    except Exception:
+        traceback.print_exc()
     finally:
         if conns.get(user) is w:
             conns.pop(user, None)
@@ -304,11 +322,11 @@ def img(n: str, k: str):
     head, b = d.split(',', 1)
     return Response(base64.b64decode(b), media_type=head[5:].split(';')[0], headers={'Cache-Control': 'public,max-age=31536000'})
 
-@app.get('/')
+@app.api_route('/', methods=['GET', 'HEAD'])
 def home():
     return FileResponse(os.path.join(BASE, 'index.html'))
 
-@app.get('/{page}.html')
+@app.api_route('/{page}.html', methods=['GET', 'HEAD'])
 def page(page: str):
     if page not in ('index', 'main'):
         raise HTTPException(404)

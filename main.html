@@ -216,7 +216,7 @@ function connect(){
   banner('Connecting to the server... (a sleeping free server can take up to a minute to wake)');
   ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+API.replace(/^https?:\/\//,'')+`/ws/${me}?t=${tok}`);
   ws.onopen=()=>{tries=0;banner('')};
-  ws.onclose=e=>{if(e.code===4001)return logout();banner(`Offline (code ${e.code}). Reconnecting...`);setTimeout(connect,Math.min(2000*++tries,10000))};
+  ws.onclose=e=>{if(e.code===4001)return logout();banner(`Offline (code ${e.code}). The server may be waking up or restarting. Reconnecting...`);fetch(API+'/check/'+me+'?t='+tok).then(r=>{if(r.status===401)logout()}).catch(()=>{});setTimeout(connect,Math.min(2000*++tries,10000))};
   ws.onmessage=e=>on(JSON.parse(e.data));
 }
 setInterval(()=>{if(ws&&ws.readyState===1)ws.send('{"a":"ping"}')},25000);
@@ -239,6 +239,7 @@ function on(m){
       (msgs[m.room]=msgs[m.room]||[]).push(m.m);
       if(cur===m.room){renderMsgs()}else if(m.m.from!==me){unread[m.room]=(unread[m.room]||0)+1;renderList()}
       break;
+    case 'err':toast('Server error: '+m.m);break;
     case 'cring':ring(m);break;
     case 'cfull':toast('This call already has 6 people.');endCall(true);break;
     case 'cpeers':m.peers.forEach(async p=>{const pc=mkpc(p);const o=await pc.createOffer();await pc.setLocalDescription(o);send({a:'sig',to:p,room:C.room,d:{o:pc.localDescription}})});break;
