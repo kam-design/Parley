@@ -187,6 +187,7 @@ input:focus,textarea:focus,select:focus{border-color:var(--acc)}
   <button class="btn s" id="cv" onclick="tgl('video')">Camera off</button>
   <button class="btn d" onclick="endCall()">Leave call</button></div></div>
 <div id="ring"><span id="rt"></span><button class="btn" id="rj">Join</button><button class="btn s" onclick="$('ring').classList.remove('on')">Dismiss</button></div>
+<div id="conn" style="display:none;position:fixed;top:0;left:0;right:0;background:#7a2e12;color:#fff;text-align:center;padding:7px 10px;font-size:13px;z-index:50"></div>
 <div id="toast"></div>
 
 <script>
@@ -199,7 +200,7 @@ const tm=t=>new Date(t).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})
 let ws,groups=[],users=[],posts=[],reqs=[],out=[],restored=0,cur=null,msgs={},unread={},myGames=[],pimg='',C=null,Q=Promise.resolve(),rec=null;
 const dm=u=>'dm:'+[me,u].sort().join('|');
 const mine=g=>g.members.includes(me);
-const send=o=>ws&&ws.readyState===1&&ws.send(JSON.stringify(o));
+const send=o=>{if(ws&&ws.readyState===1){ws.send(JSON.stringify(o));return true}toast('Offline: reconnecting to the server...');return false};
 function toast(t){const e=$('toast');e.textContent=t;e.style.display='block';clearTimeout(e._t);e._t=setTimeout(()=>e.style.display='none',3200)}
 function logout(){localStorage.removeItem('parley_token');localStorage.removeItem('parley_user');location.href='index.html'}
 $('meName').textContent=me;
@@ -209,11 +210,16 @@ document.querySelectorAll('nav .nb').forEach(b=>b.onclick=()=>{
   b.classList.add('on');$('v-'+b.dataset.v).classList.add('on');if(b.dataset.v!=='msg')document.body.classList.remove('inchat');sessionStorage.setItem('pv',b.dataset.v);
 });
 
+let tries=0;
+function banner(t){const b=$('conn');b.style.display=t?'block':'none';b.textContent=t||''}
 function connect(){
-  ws=new WebSocket(`${API.replace('http','ws')}/ws/${me}?t=${tok}`);
-  ws.onclose=e=>e.code===4001?logout():setTimeout(connect,2000);
+  banner('Connecting to the server... (a sleeping free server can take up to a minute to wake)');
+  ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+API.replace(/^https?:\/\//,'')+`/ws/${me}?t=${tok}`);
+  ws.onopen=()=>{tries=0;banner('')};
+  ws.onclose=e=>{if(e.code===4001)return logout();banner(`Offline (code ${e.code}). Reconnecting...`);setTimeout(connect,Math.min(2000*++tries,10000))};
   ws.onmessage=e=>on(JSON.parse(e.data));
 }
+setInterval(()=>{if(ws&&ws.readyState===1)ws.send('{"a":"ping"}')},25000);
 connect();
 
 function on(m){
