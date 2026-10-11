@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: parley
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.3
+      - key: DATA_DIR
+        value: /data
+    disk:
+      name: parley-data
+      mountPath: /data
+      sizeGB: 1
