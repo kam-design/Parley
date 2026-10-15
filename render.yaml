@@ -11,3 +11,5 @@ services:
         value: 3.12.3
       - key: MONGODB_URI
         sync: false
+      - key: ADMIN_KEY
+        sync: false

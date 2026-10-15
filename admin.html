@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Parley - Admin</title>
+<style>
+body{margin:0;background:#0e1013;color:#e4e6e9;font:15px/1.5 system-ui,sans-serif;padding:24px;max-width:760px;margin:auto}
+input,button{font:inherit;padding:9px 12px;border-radius:8px;border:1px solid #262b32;background:#15181c;color:inherit}
+button{cursor:pointer;background:#f2682c;color:#1a0c05;border:0;font-weight:600;margin-right:6px}button.s{background:#1b1f24;color:#e4e6e9;border:1px solid #262b32}button.d{background:#d46a6a;color:#fff}
+.c{background:#15181c;border:1px solid #262b32;border-radius:10px;padding:14px;margin:12px 0}.m{color:#8b929c;font-size:13px}q{display:block;margin:8px 0;padding:8px;background:#1b1f24;border-radius:6px;word-break:break-word}
+</style></head><body>
+<h2>Parley reports</h2>
+<p><input id="k" type="password" placeholder="Admin key"> <button onclick="load()">Load reports</button></p>
+<div id="o" class="m">Enter your admin key to see open reports.</div>
+<script>
+const $=i=>document.getElementById(i),esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function load(){
+  const r=await fetch('/admin/api/reports?key='+encodeURIComponent($('k').value));
+  if(!r.ok){$('o').textContent=r.status===403?'Wrong key, or ADMIN_KEY is not set on the server.':'Error '+r.status;return}
+  const L=await r.json();
+  $('o').innerHTML=L.length?L.map(x=>`<div class="c"><b>${esc(x.kind)} report against ${esc(x.user)}</b><div class="m">by ${esc(x.by)} · ${new Date(x.t).toLocaleString()}</div>${x.excerpt?`<q>${esc(x.excerpt)}</q>`:''}${x.reason?`<div>Reason: ${esc(x.reason)}</div>`:''}
+  <p style="margin-bottom:0"><button class="s" onclick="act('${x._id}','dismiss')">Dismiss</button>${x.kind!=='user'?`<button onclick="act('${x._id}','remove')">Remove content</button>`:''}<button class="d" onclick="if(confirm('Ban ${esc(x.user)}?'))act('${x._id}','ban')">Ban user</button></p></div>`).join(''):'No open reports.';
+}
+async function act(id,op){
+  await fetch('/admin/api/act',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:$('k').value,id,op})});load();
+}
+</script></body></html>

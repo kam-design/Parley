@@ -77,6 +77,17 @@ input:focus,textarea:focus,select:focus{border-color:var(--acc)}
 #ring.on{display:flex}
 #toast{position:fixed;bottom:20px;right:20px;background:var(--raise);border:1px solid var(--line);padding:10px 16px;border-radius:8px;display:none;z-index:40}
 #mbody{position:relative}
+.mo{float:right;margin-left:8px;background:none;border:0;color:var(--mute);cursor:pointer;padding:0 4px;opacity:.55;font-size:16px;line-height:1}
+.mo:hover{opacity:1}
+.rxs{display:flex;gap:4px;flex-wrap:wrap;margin-top:4px}
+.rx{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:0 8px;font-size:13px;cursor:pointer}
+.rx.me{border-color:var(--acc)}
+#mm{position:fixed;z-index:60;background:var(--raise);border:1px solid var(--line);border-radius:10px;padding:6px;min-width:170px;box-shadow:0 10px 30px rgba(0,0,0,.45)}
+#mm .er{display:flex;gap:2px;padding-bottom:4px;margin-bottom:4px;border-bottom:1px solid var(--line)}
+#mm .er button{background:none;border:0;font-size:20px;cursor:pointer;padding:2px 5px;border-radius:6px}
+#mm .er button:hover{background:var(--panel)}
+#mm .mi{display:block;width:100%;text-align:left;background:none;border:0;padding:7px 10px;border-radius:6px;cursor:pointer}
+#mm .mi:hover{background:var(--panel)}
 .av img{width:100%;height:100%;object-fit:cover;border-radius:inherit}
 .av.big{width:84px;height:84px;font-size:32px;border:4px solid var(--panel);overflow:hidden}
 .banner{height:130px;background:linear-gradient(120deg,#2a0f06,#9a3412 50%,#f2682c 82%,#ffa63d) center/cover}
@@ -167,6 +178,7 @@ input:focus,textarea:focus,select:focus{border-color:var(--acc)}
 <section class="view" id="v-prof"><div class="page"><div>
   <div class="card" style="padding:0;overflow:hidden" id="pcard"></div>
   <div class="card" id="reqbox" style="display:none"></div>
+  <div class="card" id="blkbox" style="display:none"></div>
   <div class="card">
     <b>Edit profile</b>
     <div class="flex" style="margin-top:10px"><label class="btn s">Change picture<input type="file" id="avf" accept="image/*" hidden></label><label class="btn s">Change banner<input type="file" id="bnf" accept="image/*" hidden></label></div>
@@ -197,7 +209,7 @@ if(!me||!tok)location.href='index.html';
 const $=i=>document.getElementById(i);
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const tm=t=>new Date(t).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
-let ws,groups=[],users=[],posts=[],reqs=[],out=[],restored=0,cur=null,msgs={},unread={},myGames=[],pimg='',C=null,Q=Promise.resolve(),rec=null;
+let ws,groups=[],users=[],posts=[],reqs=[],out=[],blocked=[],restored=0,cur=null,msgs={},unread={},myGames=[],pimg='',C=null,Q=Promise.resolve(),rec=null;
 const dm=u=>'dm:'+[me,u].sort().join('|');
 const mine=g=>g.members.includes(me);
 const send=o=>{if(ws&&ws.readyState===1){ws.send(JSON.stringify(o));return true}toast('Offline: reconnecting to the server...');return false};
@@ -225,7 +237,7 @@ connect();
 function on(m){
   switch(m.e){
     case 'state':
-      groups=m.groups;users=m.users;reqs=m.reqs||[];out=m.out||[];restore();
+      groups=m.groups;users=m.users;reqs=m.reqs||[];out=m.out||[];{const nb=m.blocked||[];if(JSON.stringify(nb)!==JSON.stringify(blocked)){blocked=nb;setTimeout(()=>{renderFeed();cur&&renderMsgs()},0)}}restore();
       const u=users.find(x=>x.n===me);
       if(u&&!$('bio').dataset.l){$('bio').value=u.bio;myGames=[...u.games];$('bio').dataset.l=1;chips()}
       if(cur&&!cur.startsWith('dm:')&&!groups.some(g=>g.id===cur&&mine(g)))cur=null;
@@ -239,7 +251,9 @@ function on(m){
       (msgs[m.room]=msgs[m.room]||[]).push(m.m);
       if(cur===m.room){renderMsgs()}else if(m.m.from!==me){unread[m.room]=(unread[m.room]||0)+1;renderList()}
       break;
-    case 'err':toast('Server error: '+m.m);break;
+    case 'err':toast(m.m);break;
+    case 'mupd':{const L=msgs[m.room]||[];const i=L.findIndex(x=>x.id===m.m.id);if(i>=0)L[i]=m.m;if(cur===m.room)renderMsgs();break}
+    case 'mdel':msgs[m.room]=(msgs[m.room]||[]).filter(x=>x.id!==m.id);if(cur===m.room)renderMsgs();break;
     case 'cring':ring(m);break;
     case 'cfull':toast('This call already has 6 people.');endCall(true);break;
     case 'cpeers':m.peers.forEach(async p=>{const pc=mkpc(p);const o=await pc.createOffer();await pc.setLocalDescription(o);send({a:'sig',to:p,room:C.room,d:{o:pc.localDescription}})});break;
@@ -253,7 +267,7 @@ function name(r){if(r.startsWith('dm:'))return r.slice(3).split('|').find(x=>x!=
 function renderList(){
   const mg=groups.filter(mine);let h='<h4>GROUPS</h4>';
   h+=mg.length?mg.map(g=>row(g.id,g.name,g.members.length+' members',1)).join(''):'<div class="mute" style="padding:4px 16px">None yet. Create or join one in Groups.</div>';
-  h+='<h4>PEOPLE</h4>'+users.filter(u=>u.n!==me&&u.n.toLowerCase().includes(($('q').value||'').toLowerCase())).sort((a,b)=>(myF().includes(b.n)-myF().includes(a.n))||(b.on-a.on)).map(u=>row(dm(u.n),u.n,u.games.join(', ')||(u.on?'Online':'Offline'),0,u.on)).join('');
+  h+='<h4>PEOPLE</h4>'+users.filter(u=>u.n!==me&&!isBlocked(u.n)&&u.n.toLowerCase().includes(($('q').value||'').toLowerCase())).sort((a,b)=>(myF().includes(b.n)-myF().includes(a.n))||(b.on-a.on)).map(u=>row(dm(u.n),u.n,u.games.join(', ')||(u.on?'Online':'Offline'),0,u.on)).join('');
   $('lr').innerHTML=h;
   const t=Object.values(unread).reduce((a,b)=>a+b,0);$('ub').style.display=t?'':'none';$('ub').textContent=t;
 }
@@ -277,11 +291,13 @@ function renderHead(){
 }
 function renderMsgs(){
   const b=$('msgs');if(!b)return;
-  const L=msgs[cur]||[];
+  const near=!b.children.length||b.scrollHeight-b.scrollTop-b.clientHeight<150;
+  const L=(msgs[cur]||[]).filter(x=>x.from===me||!isBlocked(x.from));
   b.innerHTML=L.length?L.map(x=>{
     const body=x.k==='text'?esc(x.d):x.k==='img'?`<img src="${x.d}">`:`<audio controls src="${x.d}"></audio>`;
-    return `<div class="m ${x.from===me?'o':''}"><span class="w">${x.from===me?'You':esc(x.from)}</span><span class="tm">${tm(x.t)}</span><div>${body}</div></div>`}).join(''):'<div class="empty">No messages yet. Say hello.</div>';
-  b.scrollTop=b.scrollHeight;
+    const rx=Object.entries(x.rx||{}).map(([e,us])=>`<span class="rx ${us.includes(me)?'me':''}" onclick="react('${x.id}','${e}')">${e} ${us.length}</span>`).join('');
+    return `<div class="m ${x.from===me?'o':''}"><button class="mo" onclick="msgMenu(event,'${x.id}')" aria-label="Message options">&#8943;</button><span class="w">${x.from===me?'You':esc(x.from)}</span><span class="tm">${tm(x.t)}${x.edited?' · edited':''}</span><div>${body}</div>${rx?`<div class="rxs">${rx}</div>`:''}</div>`}).join(''):'<div class="empty">No messages yet. Say hello.</div>';
+  if(near)b.scrollTop=b.scrollHeight;
 }
 function sendText(){const i=$('mi'),v=i.value.trim();if(!v)return;send({a:'msg',room:cur,k:'text',d:v});i.value=''}
 
@@ -336,10 +352,10 @@ function mod(op,user){if(!user)return;send({a:'gmod',id:cur,op,user});setTimeout
 $('pfile').onchange=async e=>{const f=e.target.files[0];if(!f)return;pimg=await imgData(f)||'';$('pprev').src=pimg;$('pprev').style.display=pimg?'block':'none';e.target.value=''};
 function doPost(){const t=$('ptxt').value;if(!t.trim()&&!pimg)return;send({a:'post',txt:t,img:pimg});$('ptxt').value='';pimg='';$('pprev').style.display='none'}
 function renderFeed(){renderProf();
-  $('plist').innerHTML=posts.length?posts.map(p=>{const liked=p.likes.includes(me);return `<div class="card post"><div class="flex"><div class="av" style="cursor:pointer" onclick="showProf('${esc(p.by)}')">${avHTML(p.by)}</div><div class="grow"><b style="cursor:pointer" onclick="showProf('${esc(p.by)}')">${esc(p.by)}</b> <span class="mute">${new Date(p.t).toLocaleString()}</span></div></div>
+  $('plist').innerHTML=posts.filter(p=>!isBlocked(p.by)).length?posts.filter(p=>!isBlocked(p.by)).map(p=>{const liked=p.likes.includes(me);return `<div class="card post"><div class="flex"><div class="av" style="cursor:pointer" onclick="showProf('${esc(p.by)}')">${avHTML(p.by)}</div><div class="grow"><b style="cursor:pointer" onclick="showProf('${esc(p.by)}')">${esc(p.by)}</b> <span class="mute">${new Date(p.t).toLocaleString()}</span></div></div>
   ${p.txt?`<p style="margin:10px 0 0">${esc(p.txt)}</p>`:''}${p.img?`<img src="${p.img}">`:''}
-  <div class="flex" style="margin-top:12px"><button class="btn ${liked?'':'s'}" ${liked?'disabled':''} onclick="send({a:'like',id:'${p.id}'})">${liked?'Liked':'Like'} · ${p.likes.length}</button><span class="mute">${p.cm.length} comments</span><span class="grow"></span>${p.by===me?`<button class="btn s" onclick="send({a:'pdel',id:'${p.id}'})">Delete</button>`:''}</div>
-  <div style="margin-top:10px">${p.cm.map(c=>`<div class="cm"><b>${esc(c.by)}</b> ${esc(c.txt)}</div>`).join('')}</div>
+  <div class="flex" style="margin-top:12px"><button class="btn ${liked?'':'s'}" ${liked?'disabled':''} onclick="send({a:'like',id:'${p.id}'})">${liked?'Liked':'Like'} · ${p.likes.length}</button><span class="mute">${p.cm.length} comments</span><span class="grow"></span>${p.by===me?`<button class="btn s" onclick="send({a:'pdel',id:'${p.id}'})">Delete</button>`:`<button class="btn s" onclick="report('post','${p.by}','${p.id}')">Report</button>`}</div>
+  <div style="margin-top:10px">${p.cm.filter(c=>!isBlocked(c.by)).map(c=>`<div class="cm"><b>${esc(c.by)}</b> ${esc(c.txt)}</div>`).join('')}</div>
   <div class="flex" style="margin-top:8px"><input type="text" id="c-${p.id}" placeholder="Write a comment" maxlength="300" onkeypress="if(event.key==='Enter')cmt('${p.id}')"><button class="btn s" onclick="cmt('${p.id}')">Reply</button></div></div>`}).join(''):'<div class="mute">Nothing here yet. Be the first to post.</div>';
 }
 function cmt(id){const i=$('c-'+id);if(i.value.trim()){send({a:'cmt',id,txt:i.value});i.value=''}}
@@ -399,14 +415,16 @@ function avHTML(n){const u=users.find(x=>x.n===n);return u&&u.av?`<img src="${im
 function profCard(n){
   const u=users.find(x=>x.n===n)||{bio:'',games:[],fr:[]},mp=posts.filter(p=>p.by===n),likes=mp.reduce((a,p)=>a+p.likes.length,0);
   let act='';
-  if(n!==me)act=`<button class="btn" onclick="msgUser('${n}')">Message</button>`+(myF().includes(n)?`<button class="btn s" onclick="fa('funf','${n}')">Unfriend</button>`:reqs.includes(n)?`<button class="btn" onclick="fa('facc','${n}')">Accept request</button>`:out.includes(n)?`<button class="btn s" disabled>Request sent</button>`:`<button class="btn s" onclick="fa('freq','${n}')">Add friend</button>`);
-  return `<div class="banner" ${u.bn?`style="background-image:url(${imgU(n,'bn')})"`:''}></div><div style="padding:0 20px 18px"><div class="pavrow"><div class="av big">${avHTML(n)}</div><div class="flex">${act}</div></div>
+  if(n!==me&&isBlocked(n))act=`<button class="btn s" onclick="blockU('${n}',0)">Unblock</button>`;
+  else if(n!==me)act=`<button class="btn" onclick="msgUser('${n}')">Message</button>`+(myF().includes(n)?`<button class="btn s" onclick="fa('funf','${n}')">Unfriend</button>`:reqs.includes(n)?`<button class="btn" onclick="fa('facc','${n}')">Accept request</button>`:out.includes(n)?`<button class="btn s" disabled>Request sent</button>`:`<button class="btn s" onclick="fa('freq','${n}')">Add friend</button>`)+`<button class="btn s" onclick="blockU('${n}',1)">Block</button><button class="btn s" onclick="report('user','${n}','','')">Report</button>`;
+  return `<div class="banner" ${u.bn?`style="background-image:url(${imgU(n,'bn')})"`:''}></div><div style="padding:0 20px 18px"><div class="pavrow"><div class="av big">${avHTML(n)}</div><div class="flex" style="flex-wrap:wrap;justify-content:flex-end">${act}</div></div>
   <b style="font-size:20px">${esc(n)}</b> <span class="mute">${u.on?'Online':'Offline'}</span>
   ${u.bio?`<p style="margin:6px 0 0">${esc(u.bio)}</p>`:''}<div class="chips">${(u.games||[]).map(g=>`<span class="chip">${esc(g)}</span>`).join('')}</div>
   <div class="pstats"><div><b>${(u.fr||[]).length}</b><span>Friends</span></div><div><b>${likes}</b><span>Likes received</span></div><div><b>${mp.length}</b><span>Posts</span></div></div></div>`;
 }
 function renderProf(){
   $('pcard').innerHTML=profCard(me);
+  const bb=$('blkbox');bb.style.display=blocked.length?'':'none';bb.innerHTML='<b>Blocked people</b>'+blocked.map(n=>`<div class="flex" style="margin-top:8px"><div class="grow">${esc(n)}</div><button class="btn s" onclick="blockU('${n}',0)">Unblock</button></div>`).join('');
   $('frl').innerHTML=myF().length?myF().map(n=>`<div class="card flex"><div class="av" style="cursor:pointer" onclick="showProf('${n}')">${avHTML(n)}</div><div class="grow"><b>${esc(n)}</b><div class="mute">${(users.find(u=>u.n===n)||{}).on?'Online':'Offline'}</div></div><button class="btn s" onclick="msgUser('${n}')">Message</button></div>`).join(''):'<div class="mute">No friends yet. Tap a name or picture in People or the Feed to open a profile and send a request.</div>';
   $('reqbox').style.display=reqs.length?'':'none';
   $('reqbox').innerHTML='<b>Friend requests</b>'+reqs.map(n=>`<div class="flex" style="margin-top:8px"><div class="grow">${esc(n)}</div><button class="btn" onclick="fa('facc','${n}')">Accept</button><button class="btn s" onclick="fa('fdec','${n}')">Decline</button></div>`).join('');
@@ -419,6 +437,32 @@ function crop(f,w,h){return new Promise(res=>{const r=new FileReader();r.onload=
 $('avf').onchange=async e=>{const f=e.target.files[0];e.target.value='';if(!f)return;const d=await crop(f,256,256);d&&send({a:'prof',bio:$('bio').value,games:myGames,av:d});toast('Picture updated')};
 $('bnf').onchange=async e=>{const f=e.target.files[0];e.target.value='';if(!f)return;const d=await crop(f,900,260);d&&send({a:'prof',bio:$('bio').value,games:myGames,bn:d});toast('Banner updated')};
 function emo(){let p=$('ep');if(p){p.remove();return}p=document.createElement('div');p.id='ep';p.style.cssText='position:absolute;bottom:'+(innerWidth<=820?104:68)+'px;left:20px;background:var(--raise);border:1px solid var(--line);border-radius:10px;padding:8px;display:grid;grid-template-columns:repeat(6,1fr);gap:4px;z-index:5';['😀','😂','😎','🔥','👍','👏','🎮','🏆','💀','😮','❤️','🤝'].forEach(e=>{const b=document.createElement('button');b.textContent=e;b.style.cssText='background:none;border:0;font-size:20px;cursor:pointer';b.onclick=()=>{$('mi').value+=e;$('mi').focus()};p.appendChild(b)});$('chat').appendChild(p)}
+const isBlocked=n=>blocked.includes(n);
+const findMsg=id=>(msgs[cur]||[]).find(m=>m.id===id);
+function closeMenu(){const m=$('mm');m&&m.remove()}
+document.addEventListener('click',closeMenu);
+function msgMenu(ev,id){
+  ev.stopPropagation();closeMenu();
+  const x=findMsg(id);if(!x)return;
+  const g=groups.find(g=>g.id===cur),canDel=x.from===me||(g&&g.admins.includes(me));
+  const m=document.createElement('div');m.id='mm';
+  m.innerHTML=`<div class="er">${['👍','\u2764\uFE0F','😂','🔥','😮','🎮'].map(e=>`<button onclick="react('${id}','${e}')">${e}</button>`).join('')}</div>`+
+   (x.from===me&&x.k==='text'?`<button class="mi" onclick="editMsg('${id}')">Edit</button>`:'')+
+   (canDel?`<button class="mi" onclick="delMsg('${id}')">Delete</button>`:'')+
+   (x.from!==me?`<button class="mi" onclick="report('msg','${x.from}','${id}','${cur}')">Report</button>`:'');
+  document.body.appendChild(m);
+  const r=ev.target.getBoundingClientRect();
+  m.style.top=Math.max(8,Math.min(r.bottom+4,innerHeight-m.offsetHeight-8))+'px';
+  m.style.left=Math.max(8,Math.min(r.left-130,innerWidth-m.offsetWidth-8))+'px';
+}
+function react(id,e){send({a:'react',room:cur,id,emoji:e})}
+function editMsg(id){const x=findMsg(id);if(!x)return;const v=prompt('Edit message',x.d);if(v&&v.trim()&&v!==x.d)send({a:'medit',room:cur,id,d:v})}
+function delMsg(id){if(confirm('Delete this message for everyone?'))send({a:'mdel',room:cur,id})}
+function report(kind,user,ref,room){const r=prompt('Why are you reporting this? (optional)');if(r===null)return;send({a:'report',kind,user,ref,room,reason:r||''});toast('Report sent. Thank you.')}
+function blockU(n,on){
+  if(on&&!confirm(`Block ${n}? They won't be able to message you, and you won't see their posts or messages.`))return;
+  send({a:on?'block':'unblock',user:n});setTimeout(()=>$('modal').classList.contains('on')&&showProf(n),400);
+}
 function restore(){
   if(restored)return;restored=1;
   const r=sessionStorage.getItem('pr');

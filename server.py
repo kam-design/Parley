@@ -1,7 +1,7 @@
 import os, time, secrets, hashlib, base64, json, traceback
 from contextlib import asynccontextmanager
 import certifi
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
@@ -51,8 +51,38 @@ class Auth(BaseModel):
 def h(p, s):
     return hashlib.sha256((s + p).encode()).hexdigest()
 
+RL = {}
+
+def hit(key, n, secs):
+    now = time.time()
+    L = [t for t in RL.get(key, []) if now - t < secs]
+    if len(L) >= n:
+        RL[key] = L
+        return False
+    L.append(now)
+    RL[key] = L
+    if len(RL) > 20000:
+        for k in [k for k, v in RL.items() if not v or now - v[-1] > 3600]:
+            RL.pop(k, None)
+    return True
+
+def ip(req):
+    f = req.headers.get('x-forwarded-for', '')
+    return f.split(',')[0].strip() if f else (req.client.host if req.client else '?')
+
+# action -> (max count, per seconds)
+LIM = {'msg': (20, 10), 'post': (6, 60), 'cmt': (12, 60), 'gnew': (5, 3600), 'freq': (25, 3600),
+       'react': (40, 10), 'medit': (15, 30), 'report': (10, 3600), 'prof': (10, 60)}
+RX = ('\U0001F44D', '\u2764\ufe0f', '\U0001F602', '\U0001F525', '\U0001F62E', '\U0001F3AE')
+ADMIN = os.environ.get('ADMIN_KEY', '').strip()
+
+def blocked_between(a, b):
+    return b in D['users'].get(a, {}).get('blocked', []) or a in D['users'].get(b, {}).get('blocked', [])
+
 @app.post('/register')
-async def register(a: Auth):
+async def register(a: Auth, req: Request):
+    if not hit('reg:' + ip(req), 5, 3600):
+        raise HTTPException(429, 'Too many sign-ups from this network. Try again later.')
     u = a.username.strip()
     if not 3 <= len(u) <= 20 or not u.replace('_', '').isalnum():
         raise HTTPException(400, 'Username: 3-20 letters, numbers or underscores')
@@ -67,8 +97,12 @@ async def register(a: Auth):
     return {'ok': 1}
 
 @app.post('/login')
-async def login(a: Auth):
+async def login(a: Auth, req: Request):
+    if not hit('lg:' + ip(req), 30, 300) or not hit('lu:' + a.username.strip().lower(), 8, 300):
+        raise HTTPException(429, 'Too many sign-in attempts. Wait a few minutes and try again.')
     u = D['users'].get(a.username.strip())
+    if u and u.get('banned'):
+        raise HTTPException(403, 'This account has been suspended.')
     if not u or u['pw'] != h(a.password, u['salt']):
         raise HTTPException(401, 'Wrong username or password')
     tok = secrets.token_hex(16)
@@ -80,7 +114,7 @@ async def login(a: Auth):
 conns, calls = {}, {}
 
 def good_token(x, t):
-    return bool(x) and bool(t) and (t in x.get('toks', []) or t == x.get('tok'))
+    return bool(x) and not x.get('banned') and bool(t) and (t in x.get('toks', []) or t == x.get('tok'))
 
 @app.get('/check/{user}')
 def check(user: str, t: str = ''):
@@ -111,7 +145,8 @@ def view(u):
     us = [{'n': n, 'bio': x['bio'], 'games': x['games'], 'on': n in conns, 'v': x.get('ver', 0),
            'av': bool(x.get('av')), 'bn': bool(x.get('bn')), 'fr': x.get('friends', [])} for n, x in D['users'].items()]
     out = [n for n, x in D['users'].items() if u in x.get('reqs', [])]
-    return {'e': 'state', 'groups': gs, 'users': us, 'reqs': D['users'][u].get('reqs', []), 'out': out}
+    return {'e': 'state', 'groups': gs, 'users': us, 'reqs': D['users'][u].get('reqs', []), 'out': out,
+            'blocked': D['users'][u].get('blocked', [])}
 
 async def push():
     for u in list(conns):
@@ -128,6 +163,9 @@ async def leave_call(u, r):
 
 async def handle(u, m):
     a, G = m.get('a'), D['groups']
+    if a in LIM and not hit(f'{u}:{a}', *LIM[a]):
+        await to(u, {'e': 'err', 'm': 'You are doing that too fast. Wait a moment and try again.'})
+        return
     if a == 'hist':
         r = m.get('room', '')
         if can(u, r):
@@ -138,6 +176,11 @@ async def handle(u, m):
         r, k, d = m.get('room', ''), m.get('k'), str(m.get('d', ''))
         if not can(u, r) or k not in ('text', 'img', 'voice') or len(d) > 4_000_000 or not d:
             return
+        if r.startswith('dm:'):
+            other = [p for p in room_users(r) if p != u]
+            if other and blocked_between(u, other[0]):
+                await to(u, {'e': 'err', 'm': 'Message could not be delivered.'})
+                return
         if k == 'text':
             d = d[:2000]
         g = {'id': secrets.token_hex(4), 'from': u, 't': int(time.time() * 1000), 'k': k, 'd': d}
@@ -235,7 +278,7 @@ async def handle(u, m):
     elif a in ('freq', 'facc', 'fdec', 'funf'):
         t = m.get('user')
         X, Me = D['users'].get(t), D['users'][u]
-        if not X or t == u:
+        if not X or t == u or blocked_between(u, t):
             return
         mf, tf = Me.setdefault('friends', []), X.setdefault('friends', [])
         mr, tr = Me.setdefault('reqs', []), X.setdefault('reqs', [])
@@ -262,6 +305,84 @@ async def handle(u, m):
             await db.posts.delete_one({'_id': pid})
             for v in list(conns):
                 await to(v, {'e': 'posts', 'p': D['posts']})
+    elif a in ('block', 'unblock'):
+        t, Me = m.get('user'), D['users'][u]
+        if t not in D['users'] or t == u:
+            return
+        b = Me.setdefault('blocked', [])
+        if a == 'block' and t not in b:
+            b.append(t)
+            X = D['users'][t]
+            for A, B in ((Me, t), (X, u)):
+                for k in ('friends', 'reqs'):
+                    if B in A.get(k, []):
+                        A[k].remove(B)
+            await put_user(t)
+        elif a == 'unblock' and t in b:
+            b.remove(t)
+        await put_user(u)
+        await push()
+    elif a == 'report':
+        kind, tgt = m.get('kind'), m.get('user')
+        ref, room, excerpt = str(m.get('ref', ''))[:20], str(m.get('room', ''))[:60], ''
+        if kind not in ('user', 'post', 'msg') or tgt not in D['users']:
+            return
+        if kind == 'post':
+            p = next((x for x in D['posts'] if x['id'] == ref), None)
+            if not p:
+                return
+            tgt, excerpt = p['by'], (p['txt'] or '[image]')[:200]
+        elif kind == 'msg':
+            if not can(u, room):
+                return
+            x = await db.msgs.find_one({'room': room, 'id': ref})
+            if not x:
+                return
+            tgt, excerpt = x['from'], (x['d'] if x['k'] == 'text' else '[' + x['k'] + ']')[:200]
+        if tgt == u:
+            return
+        await db.reports.insert_one({'_id': secrets.token_hex(6), 'by': u, 'kind': kind, 'user': tgt, 'ref': ref,
+                                     'room': room, 'excerpt': excerpt, 'reason': str(m.get('reason', ''))[:300],
+                                     't': int(time.time() * 1000), 'status': 'open'})
+    elif a in ('medit', 'mdel', 'react'):
+        r, i = m.get('room', ''), m.get('id', '')
+        if not can(u, r):
+            return
+        x = await db.msgs.find_one({'room': r, 'id': i}, {'_id': 0, 'room': 0})
+        if not x:
+            return
+        if a == 'medit':
+            d = str(m.get('d', '')).strip()[:2000]
+            if x['from'] != u or x['k'] != 'text' or not d:
+                return
+            await db.msgs.update_one({'room': r, 'id': i}, {'$set': {'d': d, 'edited': True}})
+            x['d'], x['edited'] = d, True
+        elif a == 'mdel':
+            g = G.get(r)
+            if x['from'] != u and not (g and u in g['admins']):
+                return
+            await db.msgs.delete_one({'room': r, 'id': i})
+            for v in room_users(r):
+                await to(v, {'e': 'mdel', 'room': r, 'id': i})
+            return
+        else:
+            e = m.get('emoji')
+            if e not in RX:
+                return
+            rx = x.get('rx', {})
+            L = rx.get(e, [])
+            if u in L:
+                L.remove(u)
+            else:
+                L.append(u)
+            if L:
+                rx[e] = L
+            else:
+                rx.pop(e, None)
+            await db.msgs.update_one({'room': r, 'id': i}, {'$set': {'rx': rx}})
+            x['rx'] = rx
+        for v in room_users(r):
+            await to(v, {'e': 'mupd', 'room': r, 'm': x})
     elif a == 'cjoin':
         r = m.get('room', '')
         if not can(u, r):
@@ -313,6 +434,54 @@ async def ws(w: WebSocket, user: str, t: str = ''):
             for r in list(calls):
                 await leave_call(user, r)
             await push()
+
+def admin_ok(key):
+    return bool(ADMIN) and secrets.compare_digest(key.encode(), ADMIN.encode())
+
+@app.get('/admin/api/reports')
+async def admin_reports(key: str = ''):
+    if not admin_ok(key):
+        raise HTTPException(403, 'Wrong key')
+    return await db.reports.find({'status': 'open'}).sort('t', -1).limit(100).to_list(100)
+
+class Act(BaseModel):
+    key: str
+    id: str
+    op: str
+
+@app.post('/admin/api/act')
+async def admin_act(a: Act):
+    if not admin_ok(a.key):
+        raise HTTPException(403, 'Wrong key')
+    rp = await db.reports.find_one({'_id': a.id})
+    if not rp:
+        raise HTTPException(404, 'Report not found')
+    if a.op == 'remove':
+        if rp['kind'] == 'post':
+            D['posts'] = [p for p in D['posts'] if p['id'] != rp['ref']]
+            await db.posts.delete_one({'_id': rp['ref']})
+            for v in list(conns):
+                await to(v, {'e': 'posts', 'p': D['posts']})
+        elif rp['kind'] == 'msg':
+            await db.msgs.delete_one({'room': rp['room'], 'id': rp['ref']})
+            for v in room_users(rp['room']):
+                await to(v, {'e': 'mdel', 'room': rp['room'], 'id': rp['ref']})
+    elif a.op == 'ban':
+        x = D['users'].get(rp['user'])
+        if x:
+            x['banned'], x['tok'], x['toks'] = True, '', []
+            await put_user(rp['user'])
+            w = conns.get(rp['user'])
+            if w:
+                await w.close(4001)
+    elif a.op != 'dismiss':
+        raise HTTPException(400, 'Unknown action')
+    await db.reports.update_one({'_id': a.id}, {'$set': {'status': 'done', 'action': a.op}})
+    return {'ok': 1}
+
+@app.api_route('/admin', methods=['GET', 'HEAD'])
+def admin_page():
+    return FileResponse(os.path.join(BASE, 'admin.html'))
 
 @app.get('/img/{n}/{k}')
 def img(n: str, k: str):
